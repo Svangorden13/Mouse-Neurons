@@ -1,0 +1,480 @@
+---
+title: "Effect of Visual Stimuli on Neuron Firing Rates in Mice"
+author: "Samuel Van Gorden (995998955)"
+date: "March 20, 2023"
+output: html_document
+params:
+  title: default
+---
+
+## Abstract
+
+Our paper analyzes data on the neuronal firing patterns of mice in the presence of external stimuli and a decision-making process. We found that average neuron firing rate could be best modeled by an ANOVA model that considers two types of stimuli and their interaction as well as a random intercept term. We also present a predictive model that produces the outcome of an experiment using the stimuli and neuron firing rate as predictors, with high accuracy and specificity.
+
+## Introduction
+
+The purpose of this report is to analyze the results of an experiment performed on the neural activity of mice in the presence of external stimuli and a reward-based decision-making paradigm. Specifically, we will be addressing two research questions: 1) How do neurons in the visual cortex respond to changes in stimuli presented on a right display and left display? and 2) How well can we predict the decisions of the mice based on their neural activity and the stimuli presented? Understanding the answers to these questions will be relevant to fields such as psychology, neurology, and cognitive science since mouse brains share similarities with human brains. For instance, research continues to show that traits of the mouse brain can be used to analyze noncoding risk variants associated with neurological diseases and traits in humans (Li, 2021). These similarities allow them to be studied in place of human brains which is beneficial given the difficulties working with live human brains. This research could also provide insights to the statistical field of neural networks.
+
+The data used in our project is obtained from the study *Distributed coding of choice, action and engagement across the mouse brain* in the journal Nature (Steinmetz, 2019). We perform descriptive statistics on this data to motivate our hypotheses and propose models and then test them by performing inferential and sensitivity analyses. Finally, we build and test a model for prediction of decision-making by the mice.
+
+## Background
+
+In the study from which our data comes, Neuropixels probes were used to collect data from 10 mice over 39 sessions on 29,134 total neurons across different brain regions. Each mouse was shown images of varying contrasts (off, and three other levels of intensity) on two screens, one to the left and one to the right of the mouse's position. The mouse was then incentivized to turn a wheel from the more prominent (higher contrast) display to a central screen or to not move the wheel if there was no display. The mouse was rewarded with 50% probability for a turn in either direction if the contrasts were equal. The "correct" behavior, as just mentioned, was rewarded and recorded as feedback type with a value of 1 and "incorrect" behavior (anything other than previously mentioned) with a value of -1. This data was used to create a spatial mapping of visual, choice, and action behavior of the mice.
+
+Our goal was to take a subset of the data collected (3 sessions from one mouse, 2 sessions from another) and use it to generate a more general model which utilizes the neuron firing data as a response to the left and right contrast data. We considered models with and without interaction effects of the left and right contrasts. We considered each session as a random intercept in our model. We also constructed a logistic regression model to predict the feedback type for each trial based on the left and right contrasts and the neuronal data captured.
+
+## Descriptive Analysis
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+library(dplyr)
+library(ggplot2)
+library(lme4)
+library(gplots)
+library(gridExtra)
+library(caret)
+library(aTSA)
+library(ROCR)
+library(qwraps2)
+
+# Loading data
+
+sessions <- list()
+contrast.data <- data.frame(left=factor(), right=factor(), rate=double(), time=double(), session=integer(), result=factor())
+neuron.data <- data.frame(session=integer(), trial=integer(), time=integer(), neuron=integer())
+max.data <- data.frame(left=factor(), right=factor(), neuron=integer(), time=double(), session=integer(), result=factor())
+
+for (i in 1:5) {
+  sessions[[i]] <- readRDS(paste("./Data/session", i, ".rds", sep = ''))
+  sessions[[i]]$contrast_left <- as.factor(sessions[[i]]$contrast_left)
+  sessions[[i]]$contrast_right <- as.factor(sessions[[i]]$contrast_right)
+  sessions[[i]]$feedback_type <- as.factor(sessions[[i]]$feedback_type)
+  
+  n.trials <- length(sessions[[i]]$spks)
+  n.neurons <- dim(sessions[[i]]$spks[[1]])[1]
+  firingrate <- numeric(n.trials)
+  max.neuron <- numeric(n.trials)
+  for(j in 1:n.trials){
+    firingrate[j] <- sum(sessions[[i]]$spks[[j]])/n.neurons/0.4 #Average neuron firing rate per second
+    max.neuron[j] <- max(colSums(sessions[[i]]$spks[[j]]))/n.neurons
+  }
+  
+  contrast.data <- contrast.data %>% add_row(left = sessions[[i]]$contrast_left, right = sessions[[i]]$contrast_right, rate = firingrate, time = unlist(lapply(sessions[[i]]$time, function(x) x[1])), session = i, result = sessions[[i]]$feedback_type)
+  
+  for (j in 1:length(sessions[[i]]$spks)) {
+    neuron.data <- neuron.data %>% add_row(session = i, trial = j, time = 1:39, neuron = colMeans(sessions[[i]]$spks[[j]]))
+  }
+  
+  max.data <- max.data %>% add_row(left = sessions[[i]]$contrast_left, right = sessions[[i]]$contrast_right, neuron = max.neuron, time = unlist(lapply(sessions[[i]]$time, function(x) x[1])), session = i, result = sessions[[i]]$feedback_type)
+  
+}
+
+neuron.data <- neuron.data %>% group_by(session, time) %>% summarise(neuron = mean(neuron))
+neuron.data$session <- as.factor(neuron.data$session)
+
+# Helper function taken from https://stackoverflow.com/questions/23891140/r-how-to-visualize-confusion-matrix-using-the-caret-package
+draw_confusion_matrix <- function(cm) {
+
+  layout(matrix(c(1,1,2)))
+  par(mar=c(2,2,2,2))
+  plot(c(100, 345), c(300, 450), type = "n", xlab="", ylab="", xaxt='n', yaxt='n')
+  title('CONFUSION MATRIX', cex.main=2)
+
+  # create the matrix 
+  rect(150, 430, 240, 370, col='#3F97D0')
+  text(195, 435, 'Class1', cex=1.2)
+  rect(250, 430, 340, 370, col='#F7AD50')
+  text(295, 435, 'Class2', cex=1.2)
+  text(125, 370, 'Predicted', cex=1.3, srt=90, font=2)
+  text(245, 450, 'Actual', cex=1.3, font=2)
+  rect(150, 305, 240, 365, col='#F7AD50')
+  rect(250, 305, 340, 365, col='#3F97D0')
+  text(140, 400, 'Class1', cex=1.2, srt=90)
+  text(140, 335, 'Class2', cex=1.2, srt=90)
+
+  # add in the cm results 
+  res <- as.numeric(cm$table)
+  text(195, 400, res[1], cex=1.6, font=2, col='white')
+  text(195, 335, res[2], cex=1.6, font=2, col='white')
+  text(295, 400, res[3], cex=1.6, font=2, col='white')
+  text(295, 335, res[4], cex=1.6, font=2, col='white')
+
+  # add in the specifics 
+  plot(c(100, 0), c(100, 0), type = "n", xlab="", ylab="", main = "DETAILS", xaxt='n', yaxt='n')
+  text(10, 85, names(cm$byClass[1]), cex=1.2, font=2)
+  text(10, 70, round(as.numeric(cm$byClass[1]), 3), cex=1.2)
+  text(30, 85, names(cm$byClass[2]), cex=1.2, font=2)
+  text(30, 70, round(as.numeric(cm$byClass[2]), 3), cex=1.2)
+  text(50, 85, names(cm$byClass[5]), cex=1.2, font=2)
+  text(50, 70, round(as.numeric(cm$byClass[5]), 3), cex=1.2)
+  text(70, 85, names(cm$byClass[6]), cex=1.2, font=2)
+  text(70, 70, round(as.numeric(cm$byClass[6]), 3), cex=1.2)
+  text(90, 85, names(cm$byClass[7]), cex=1.2, font=2)
+  text(90, 70, round(as.numeric(cm$byClass[7]), 3), cex=1.2)
+
+  # add in the accuracy information 
+  text(30, 35, names(cm$overall[1]), cex=1.5, font=2)
+  text(30, 20, round(as.numeric(cm$overall[1]), 3), cex=1.4)
+  text(70, 35, names(cm$overall[2]), cex=1.5, font=2)
+  text(70, 20, round(as.numeric(cm$overall[2]), 3), cex=1.4)
+}
+
+```
+
+We begin by examining our data. The complete data come from five individual datasets, each of which corresponds to a session-mouse pair. Each session then contains data for a number of trials. The relevant trial-level data are the left and right contrast levels, feedback type, and the neuron spike matrices. The contrast data take on four levels - 0, 0.25, 0.5, and 1, corresponding to the intensity of the display on the right or left screen. Feedback type is a binary variable which takes value 1 if the mouse performed the "correct" action and -1 otherwise. The neuron spike matrices have a row for each neuron and column for each time period observed within each trial. Each entry in the matrix takes value 1 if the neuron indicated by its row fired during the time period indicated by its column, and 0 otherwise. While the same number of time periods was observed for each trial, the number of trials and the number of neurons being measured in each trial differed between sessions. Therefore we are dealing with imbalanced data. We also have no way of knowing exactly *which* neurons were being measured during each session, and therefore whether or not there was any neuron overlap between sessions.
+
+Since we were interested in how neurons responded to the left and right contrast levels, we needed a way to model the firing of neurons as the output in our model. As a first step, we wanted to reduce the spike matrix for each trial into a single scalar value. Therefore, we considered the average neuron firing rate which involved counting the number of neurons that fired in each time period, summing these values for all time periods in each trial, dividing by the number of neurons measured in that trial, and again dividing by the span of the time periods in each trial (roughly 0.4 seconds for all session-trials). We lose information about the timing of neurons firing and which specific neurons fired by using this summarization, but the latter won't likely add any relevant analysis since we don't know *which* neurons are represented by any given row. We will consider the loss of time-relevant data later.
+
+We provide general summary statistics for the relevant variables we will be using below, with counts and percentages (value in parentheses) for each level of categorical variables and minimum, median, mean $\pm$ standard deviation, and maximum for quantitative variables. The first five columns are broken down by session and the last column is the full dataset:
+
+```{r, echo=FALSE, warning=FALSE, results='asis'}
+options(qwraps2_markup = "markdown")
+attach(contrast.data)
+data.sum <- list("Left Contrast" =
+                   list("0" = ~ qwraps2::n_perc0(left == 0),
+                        "0.25" = ~ qwraps2::n_perc0(left == 0.25),
+                        "0.5" = ~ qwraps2::n_perc0(left == 0.5),
+                        "1" = ~ qwraps2::n_perc0(left == 1)),
+                 "Right Contrast" =
+                   list("0" = ~ qwraps2::n_perc0(right == 0),
+                        "0.25" = ~ qwraps2::n_perc0(right == 0.25),
+                        "0.5" = ~ qwraps2::n_perc0(right == 0.5),
+                        "1" = ~ qwraps2::n_perc0(right == 1)),
+                 "Rate" =
+                   list("min" = ~ round(min(rate), digits = 2),
+                        "median" = ~ round(median(rate), digits = 2),
+                        "mean/sd" = ~ qwraps2::mean_sd(rate),
+                        "max" = ~ round(max(rate), digits = 2)),
+                 "Result" =
+                   list("-1" = ~ qwraps2::n_perc0(result == -1),
+                        "1" = ~ qwraps2::n_perc0(result == 1))
+                 )
+
+detach(contrast.data)
+full.sum <- summary_table(contrast.data, data.sum)
+session.sum <- summary_table(contrast.data %>% group_by(session), data.sum)
+cbind(session.sum, full.sum)
+```
+
+Next we observe the main effects and interaction plots for the left and right contrasts on average neuron firing rate:
+
+```{r, echo=FALSE, fig.height=8, fig.width=14}
+# Plot main and interaction effects
+par(mfrow = c(2,2))
+plotmeans(rate~left, xlab = "Left Contrast", ylab = "Avg Firing Rate", main = "Main effect, Left Contrast", cex.lab = 1.5, data = contrast.data)
+plotmeans(rate~right, xlab = "Right Contrast", ylab = "Avg Firing Rate", main = "Main effect, Right Contrast", cex.lab = 1.5, data = contrast.data)
+interaction.plot(contrast.data$left, contrast.data$right, contrast.data$rate, cex.lab = 1.5, ylab = "Avg Firing Rate", xlab = "Left Contrast", trace.label = "Right Contrast", main = "Interaction effect, Right Contrast x Left Contrast")
+
+```
+
+The main effect for left and right contrasts show the mean firing rate tends to increase with increasing contrast, though this is more pronounced for right contrasts than left contrasts. From the interaction plot we can see that the right contrast values (curves indicated in legend) are clearly affected by the left contrast values (x-axis), with respect to the mean neuron firing rate produced. One thing to notice is that the neuron firing rate is high for high levels of right contrast (0.5, 1) when left contrast is level 0 and for high levels of left contrast when right contrast is level 0. This could indicate that more neurons fire on average when the choice is more clear (i.e. larger contrast difference) for the mice.
+
+It is also worth checking whether the session-mouse pairing has any effect on the observed neuron firing rate that isn't explained by the differences in left or right contrasts used in each session. If session is to be included in our model it should be as a random effect since sessions 1-5 are just a subset of the total number of sessions (or even smaller subset of the potentially infinite hypothetical sessions) performed in the experiment. We started with a breakdown of the proportion of each contrast value used across all sessions:
+
+```{r, echo=FALSE, warning=FALSE, fig.width=14}
+n.trials <- contrast.data %>% count(session)
+df1 <- tally(contrast.data %>% group_by(session, left))
+df2 <- tally(contrast.data %>% group_by(session, right))
+
+for (i in 1:5) {
+  df1[df1$session == i, "frac"] <- df1[df1$session == i, "n"] / n.trials[i, "n"]
+  df2[df2$session == i, "frac"] <- df2[df2$session == i, "n"] / n.trials[i, "n"]
+}
+
+df1$session <- as.factor(df1$session)
+df2$session <- as.factor(df2$session)
+
+# Counts of each stimulus value - left contrasts
+p1 <- ggplot(data = df1, aes(x = left, y = frac, fill = session)) +
+  geom_bar(position = "dodge", width = 0.5, stat = "identity") +
+  labs(title = "Left Contrasts") +
+  theme(axis.title = element_text(size = 15))
+
+# Counts of each stimulus value - right contrasts
+p2 <- ggplot(data = df2, aes(x = right, y = frac, fill = session)) +
+  geom_bar(position = "dodge", width = 0.5, stat = "identity") +
+  labs(title = "Right Contrasts") +
+  theme(axis.title = element_text(size = 15))
+
+grid.arrange(p1, p2, ncol = 2)
+
+```
+
+We can see that contrast level 0 dominates the other levels by far across all sessions, for both left and right displays. This may be because the experiment designers wanted most trials to only display an image on one screen at a time to make the "correct" answer more easily understood by the mice. There is some intra-session variation between the proportions of each level of left and right contrast, however these are small compared to the difference between the inter-session variations between level 0 contrast and the other levels.
+
+```{r intercept-plot, echo=FALSE, warning=FALSE, fig.show='hide', fig.height=8, fig.width=14}
+par(mfrow=c(2,2))
+
+plotmeans(rate~session, xlab = "Session", ylab = "Avg Firing Rate", main = "Main effect, Session", cex.lab = 1.5, data = contrast.data)
+interaction.plot(contrast.data$left, contrast.data$session, contrast.data$rate, cex.lab = 1.5, ylab = "Avg Firing Rate", xlab = "Left Contrast", trace.label = "session", main = "Interaction effect, Session x Left Contrast")
+interaction.plot(contrast.data$right, contrast.data$session, contrast.data$rate, cex.lab = 1.5, ylab = "Avg Firing Rate", xlab = "Right Contrast", trace.label = "session", main = "Interaction effect, Session x Right Contrast")
+
+```
+
+Next we observed the main effect and interaction plots for sessions on neuron firing rate (see "Random Intercept" in Appendix). The main effect plot shows a clear difference in average neuron firing rate across sessions. However, the interaction plots show fairly flat curves for all but session 4, indicating that session does not seem to interact with left or right contrasts with respect to average neuron firing rate. This intuitively makes sense because there doesn't seem to be any difference in how the experiments were conducted between sessions that would have an effect on the contrasts used. Specifically, from the previous histograms we saw that there was only slight discrepancy between the proportion of contrast levels used across sessions. Since there does appear to be a difference in average neuron firing rate across sessions, but little difference across left or right contrast levels within each session, it seems most appropriate to include session as a random intercept in our model.
+
+As a measure of determining whether information was lost in collapsing the neuron firing rate into a single value for each trial, we performed time series analysis on the average proportion of neurons that fired **for each time period** of all trials in each session:
+
+$$
+\begin{aligned}
+Y_{ti} = \frac{1}{n_{T_i}+n_{N_i}}\sum_{j=1}^{n_{T_i}}\sum_{k=1}^{n_{N_i}}(X_{ti})_{jk} \\
+\end{aligned}
+$$
+
+Where $i$ is the session number, $t$ is the time period, $Y_{ti}$ is the average proportion of neurons that fired during time period $t$ in session $i$, $n_{T_i}$ is the number of trials in session $i$, $n_{N_i}$ is the number of neurons measured in session $i$ and $(X_{ti})_{jk}$ is 1 if the ${jk}^{th}$ neuron fired during time period $t$ of session $i$, and 0 otherwise.
+
+Doing so provides us with the following time series:
+
+```{r, echo=FALSE, warning=FALSE}
+# Plot time series of neuron firing rate
+ggplot(neuron.data, aes(x = time, y = neuron, group = session, color = session)) +
+  geom_line(size = 1.5) +
+  labs(title = "Average neuron firing rate per time period") + ylab("proportion of neurons fired")
+
+```
+
+As we can see there is bias in the proportion of neurons firing for each session, with sessions 1, 2, and 3 having higher mean and 4 and 5 having lower mean. Also the three sessions with higher mean seem to have two peaks, whereas the two with lower mean seem to gradually increase over the entire trial.
+
+```{r, echo=FALSE, warning=FALSE, eval=FALSE}
+# Test for stationarity
+for (i in 1:5) {
+  adf.test(neuron.data$neuron[neuron.data$session == i])
+}
+
+```
+
+We find, through use of the Augmented Dickey-Fuller Test, that three sessions (2, 3, and 4) are stationary or can be made stationary through detrending and differencing (Pandian, 2023). Going forward we will look at sessions 3 and 4 to consider one series from the low-mean group and one from high-mean group. We take a 1-lag difference of session 3 and remove the trend and take a 1-lag difference of session 4, then re-plot them:
+
+```{r, echo=FALSE, warning=FALSE}
+neuron.s3 <- (neuron.data$neuron - lag(neuron.data$neuron, 1))[2:39]
+trend4 <- lm(neuron ~ time, data = neuron.data[neuron.data$session == 4,])
+neuron.s4 <- neuron.data$neuron - fitted(trend4)
+neuron.s4 <- (neuron.s4 - lag(neuron.s4, 1))[2:39]
+ggplot() +
+  geom_line(aes(x = 1:38, y = neuron.s3, color = "red"), size = 1.5) +
+  geom_line(aes(x = 1:38, y = neuron.s4, color = "blue"), size = 1.5) +
+  labs(title = "Stationary Time Series") + xlab("time") + ylab("proportion of neurons fired") +
+  scale_fill_discrete(name = "session", labels = c(3, 4))
+
+```
+
+We see that, once adjusted to be made stationary, our time series are nearly equivalent for sessions 3 and 4. Therefore, going forward we will only analyze one series - session 3. We now look at the ACF/PACF plots (see "ACF" and "PACF" in Appendix) to determine if an MA or AR model will fit our data well.
+
+```{r acf-plot, echo=FALSE, warning=FALSE, fig.show='hide'}
+acf(neuron.s3)
+
+```
+
+```{r pacf-plot, echo=FALSE, warning=FALSE, fig.show='hide'}
+pacf(neuron.s3)
+
+```
+
+We find that there are no significant (p<.05) auto-correlations or partial auto-correlations for our time series. Therefore, we conclude that the series is random and proportion of neurons that fire (averaged over all trials for each session) at each time point are independent of those at other time points (Monigatti, 2022). In other words, the proportion of neurons that fire at any given time is not influenced by previous neurons firing.
+
+Since the bias of the individual sessions' neuron firing rates should already be covered by our use of session as a random intercept, we proceed without making any changes to our model based on our time series analysis.
+
+## Inferential Analysis
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# Generate mixed effects models
+int.model <- lmer(rate ~ left * right + (1|session), data = contrast.data)
+add.model <- lmer(rate ~ left + right + (1|session), data = contrast.data)
+
+```
+
+Based on our exploratory analysis, it seems that left and right contrasts may have significant main and interaction effects on average neuron firing rate, and that session may have an effect that can be represented as a random intercept in our model. Therefore, we will first look at the following model:
+
+$$
+\begin{aligned}
+Y_{ijkl} = \mu_{...} + \alpha_i + \beta_j + (\alpha\beta)_{ij} + \gamma_k + \epsilon_{ijkl} \\
+\end{aligned}
+$$
+
+Where $Y_{ijkl}$ is a the average neuron firing rate of a single trial, $\alpha_i$ represents the treatment effect of the $i^{th}$ level of left contrast, $\beta_j$ the treatment effect of the $j^{th}$ level of right contrast, $(\alpha\beta)_{ij}$ the interaction effect of the $i^{th}$ level of left contrast and $j^{th}$ level of right contrast, $\gamma_k \sim N(0, \sigma_\gamma^2)$ the random intercept for the $k^{th}$ session, and $\epsilon_{ijkl} \sim N(0, \sigma^2)$ the error term. We impose constraints $\sum_i\alpha_i=0$, $\sum_i\beta_j=0$, and $\sum_i(\alpha\beta)_{ij}=\sum_j(\alpha\beta)_{ij}=0$.
+
+```{r, echo=FALSE, warning=FALSE, eval=FALSE}
+summary(int.model)
+
+```
+
+We find that the intercept term estimate is positive (2.64405) and significant at p<0.01. This means that we can say the average neuron firing rate is non-zero with 99% confidence when left and right contrasts are at their reference levels (0). Similarly, all levels of the main effects (left and right contrasts), except for the 0.25 level of the left contrast, are positive and significant at p<.05. This is interpreted as the effect of increasing either the left or right contrast level from 0 to 0.25, 0.5, or 1 will *increase* the average neuron firing rate, and we can say this with 95% confidence. Lastly, the interaction effects between left and right contrasts are all negative but only four combinations of levels are significant at p<.05 (left=0.5, right=0.25; left=1, right=0.25; left=1, right=0.5; left=0.25, right=1). In other words, we can only say, with confidence of at least 95%, that these four combinations of left and right contrasts produce a *lower* average neuron firing rate than that produced at reference levels for left and right contrasts.
+
+In analyzing the effect of the random intercept term, $\gamma_k$, we estimate that $\frac{\sigma_\gamma^2}{\sigma_\gamma^2+\sigma^2}$ = 76% of the total model variance comes from some factor or factors that vary from session to session. This means that only 24% comes from the residuals. Since the variance from session is so high compared to the residual variance, we must consider that there is likely some factor outside of left or right contrasts that differs between sessions and should be considered in any future studies.
+
+Given that the interaction terms did not seem to be as significant as the main effect terms, it is worth considering an additive model without the interaction terms:
+
+$$
+\begin{aligned}
+Y_{ijkl} = \mu_{...} + \alpha_i + \beta_j + \gamma_k + \epsilon_{ijkl} \\
+\end{aligned}
+$$
+
+```{r, echo=FALSE, warning=FALSE, eval=FALSE}
+summary(add.model)
+anova(int.model, add.model)
+
+```
+
+We saw roughly the same results as before for the main intercept, main effects, and proportion of model variance from random intercept. We then compared the explained variance of the two models by using an F-test in order to determine if there is a significant increase in model variance by removing the interaction terms ($H_0: \sigma_{full}^2 = \sigma_{red}^2$). We obtained a p-value of 0.04112 which means that we reject $H_0$ at the .05 level of significance and conclude that the model variance is reduced by including the interaction term. Therefore, going forward the model including the interaction term should be used (Pipis, 2021).
+
+## Sensitivity Analysis
+
+We verify the assumption that the errors are normally distributed with mean 0 and constant variance by observing the normal Q-Q and residuals vs fitted plots:
+
+```{r echo=FALSE, warning=FALSE, fig.width=14}
+par(mfrow=c(1,2))
+qqnorm(resid(int.model))
+qqline(resid(int.model))
+plot(resid(int.model)~fitted(int.model))
+abline(h = 0, col = "red")
+
+```
+
+The normal Q-Q plot shows a modest right-skew compared to normal (heavy right tail, light left tail). The fitted vs residual plot shows residuals roughly evenly spread across the x-axis (mean $\approx$ 0) and mostly constant variance (somewhat higher for higher fitted values). These are minor violations of our assumptions and should be considered acceptable since the residuals are not bimodal (Schielzeth, 2020) and our large sample size will cause averages (statistics) to converge to normality by the CLT.
+
+We also tried fitting a model that used maximum proportion of neurons that fired over all time periods in each trial as output instead of the average. In order to compare this model to our previous one, we chose to use the BIC criterion, obtaining values of 2485.093 for the averages model and -5980.687 for the maximums model. Clearly, the maximums model provides the better bias-variance tradeoff (lower MSEE) than the averages model. We also checked the normal Q-Q and fitted vs. residuals plots for the maximums model and did find that there appeared to be greater deviation from normality of errors (heavy right tail - see "Assumptions for Maximum Model" in Appendix). Since deviations from normality of errors is likely not too much of a concern for our models, it may be better to utilize the maximums model in future research.
+
+```{r, echo=FALSE, warning=FALSE}
+max.model <- lmer(neuron ~ left * right + (1|session), data = max.data)
+
+```
+
+```{r, echo=FALSE, warning=FALSE, eval=FALSE}
+summary(max.model)
+BIC(int.model)
+BIC(max.model)
+
+```
+
+```{r max-plot, echo=FALSE, warning=FALSE, fig.show='hide'}
+par(mfrow=c(1,2))
+qqnorm(resid(max.model))
+qqline(resid(max.model))
+plot(resid(max.model)~fitted(max.model))
+abline(h = 0, col = "red")
+
+```
+
+## Predictive Modeling
+
+```{r, echo=FALSE, warning=FALSE}
+# Generate logistic regression model
+session1.data <- contrast.data %>% filter(session == 1)
+session1.data$left <- as.numeric(session1.data$left)
+session1.data$right <- as.numeric(session1.data$right)
+test.data <- session1.data[1:100,]
+train.data <- session1.data[101:nrow(session1.data),]
+logit <- glm(result ~ left*right*rate, family = "binomial", data = train.data)
+logit.add <- glm(result ~ left+right+rate, family = "binomial", data = train.data)
+
+# Predict first 100 trials in session 1 and check error rate
+pred <- predict(logit, test.data, type = "response")
+pred.add <- predict(logit.add, test.data, type = "response")
+
+```
+
+We now wish to provide a model that can be used to predict the feedback type for a given trial based on the left and right contrasts and average neuron firing rate. Since feedback type is a binary variable corresponding to whether or not the mouse made the "correct" choice for each trial, we will use a logistic regression model to predict its values:
+
+$$
+\begin{aligned}
+\log(\frac{p}{1-p}) = \beta_0 + \beta_1X_1 + \beta_2X_2 + \beta_3X_3 \\
+\end{aligned}
+$$
+
+Where $X_1$, $X_2$, and $X_3$ refer to the observed values of left contrast, right contrast, and average neuron firing rate, respectively, and p is the probability that a mouse will make the "correct" choice given those observed values. We divide p by 1-p and take the log of it (log-odds) so that a positive value corresponds to a "correct" choice and negative value corresponds to an "incorrect" choice. We can solve for the $\beta_i$'s as we would in a normal linear regression.
+
+We used the glm() function in R to train a logistic regression model on all but the first 100 trials of session 1. We then used those first 100 trials as a test data set to determine how well our model predicts feedback type. In order to determine the cutoff (p>cutoff $\implies$ "correct" feedback, p$\le$cutoff $\implies$ "incorrect" feedback) we calculate the ROC curve and use the area under the curve.
+
+```{r, echo=FALSE, warning=FALSE}
+# ROC curve for additive model
+predobj.add <- prediction(pred.add, test.data$result)
+perf.add <- performance(predobj.add, measure = "tpr", x.measure = "fpr")
+plot(perf.add)
+
+```
+
+```{r, echo=FALSE, warning=FALSE, eval=FALSE}
+# AUC for additive model
+auc(test.data$result, pred.add)
+
+```
+
+We find that the area under the curve is 0.6117 so we will use this as our cutoff. Passing the first 100 trials in session 1 (our test data) into our classification scheme, we get the following confusion matrix, sensitivity, and specificity using the simple additive model shown above:
+
+```{r, echo=FALSE, warning=FALSE}
+pred.resp.add <- as.factor(unlist(lapply(pred.add, function(x) if (x < 0.6117) -1 else 1)))
+cm.add <- confusionMatrix(data = pred.resp.add, reference = test.data$result)
+draw_confusion_matrix(cm.add)
+
+```
+
+We find that this model is reasonably accurate with very high specificity but sensitivity below 50%. This means that 71% of our testing data was correctly classified, while the rate of true negatives was 83.8% and the rate of true positives was 34.6%. If incorrectly classifying "incorrect" feedback of trials is more costly then this appears to be a good model. However, if incorrectly classifying "correct" feedback is more costly then we would want to increase the false negative cost parameter when determining our cutoff value.
+
+```{r, echo=FALSE, warning=FALSE, eval=FALSE}
+# AUC for non-additive model
+auc(test.data$result, pred)
+```
+
+```{r roc-plot, echo=FALSE, warning=FALSE, fig.show='hide'}
+# ROC for non-additive model
+predobj <- prediction(pred, test.data$result)
+perf <- performance(predobj, measure = "tpr", x.measure = "fpr")
+plot(perf)
+
+```
+
+```{r cm-plot, echo=FALSE, warning=FALSE, fig.show='hide'}
+pred.resp <- as.factor(unlist(lapply(pred, function(x) if (x < 0.6364) -1 else 1)))
+cm <- confusionMatrix(data = pred.resp, reference = test.data$result)
+draw_confusion_matrix(cm)
+
+```
+
+We also tried fitting a model that includes interaction terms (non-additive - see "ROC" and "Confusion Matrix" in Appendix). We found the optimal cutoff to be 0.6364 and got somewhat higher sensitivity (42.3%) but similar specificity (82.4%) and accuracy (72%). This could be a better model if, as mentioned above, incorrectly classifying "correct" behavior is more costly, but outside of any additional assumptions or information we will go forward with the additive model since it contains fewer parameters (3 compared to 7 for non-additive).
+
+## Conclusion
+
+Our analyses have led us to believe that average neuron firing rate can be reasonably modeled by considering the left and right stimuli presented in each trial as well as the session number as a random intercept in our model. We found that the model which considers the interaction between left and right stimuli provides a model with significantly lower variance than the model without interaction terms. The high percentage of model variance explained by the random intercept shows that there are likely some explanatory variables present in each session that were not measured but differ between sessions and are significant in modeling neuron firing rate. This leads us to believe that if the experiment is to be run again we should try to either control for these variables or measure them and include them in our model. We also found that using maximum neuron firing rate as output instead of average neuron firing rate provided lower MSEE without violating assumptions much more than the averages model. More research would need to be performed to determine if this is actually an acceptable way of condensing neuron information though.
+
+We also determined that the best *predictive* model for determining the feedback of each trial based on the stimuli presented and neuron firing rate **did** include interaction terms. This was due to the fact that it provided higher sensitivity with similar accuracy and specificity to the additive model with fewer parameters. If we determined false negatives to be more costly, then the non-additive model might be considered better. Otherwise, the additive model produced similar results with fewer parameters.
+
+In future experiments, it will be useful to capture data on specifically which neurons are being measured. This will allow us to be able to combine data from different sessions more robustly and will allow us to provide more specific information. If information on which *specific* neurons fire is unattainable, it would still be useful to know which regions of the brain they are from for a more detailed and robust analysis.
+
+We hope that in conducting these analyses, more insight will be gained into how the neurons in mice brains (and by extension human brains to an extent) respond in the presence of external stimuli. Though this is a simple analysis with few predictors and minimally-informative data on neuron response, we believe that the results from this analysis will motivate further research with more informative data. This research could help us better understand brain function and disfunction, and could help establish similar experiments on actual human brains. Lastly, our predictive model showed promise in being able to classify action vs inaction, and with different predictors could be extended to more abstract applications such as economic data studies regarding human decision-making in the presence of scarcity or incentives.
+
+## Appendix
+
+### Code
+
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+```
+
+### Extra Plots
+
+![Random Intercept](`r knitr::fig_chunk("intercept-plot", "png")`)
+
+![ACF](`r knitr::fig_chunk("acf-plot", "png")`)
+
+![PACF](`r knitr::fig_chunk("pacf-plot", "png")`)
+
+![Assumptions for Maximum Model](`r knitr::fig_chunk("max-plot", "png")`)
+
+![Confusion Matrix](`r knitr::fig_chunk("cm-plot", "png")`)
+
+![ROC](`r knitr::fig_chunk("roc-plot", "png")`)
+
+## References
+
+1. Steinmetz, N.A., Zatka-Haas, P., Carandini, M. et al (2019, November 27). Distributed coding of choice, action and engagement across the mouse brain. *Nature* 576, 266–273. https://doi.org/10.1038/s41586-019-1787-x
+
+2. Pipis, George (2021, May 9). How To Compare Nested Models in R. *Predictive Hacks*. https://predictivehacks.com/how-to-compare-nested-models-in-r/
+
+3. Schielzeth, H, Dingemanse, NJ, Nakagawa, S, et al (2020, June 12). Robustness of linear mixed-effects models to violations of distributional assumptions. *Methods Ecol Evol.*; 11: 1141– 1152. https://doi.org/10.1111/2041-210X.13434
+
+4. Pandian, Shanthababu (2023, February 20). Time Series Analysis and Forecasting | Data-Driven Insights (Updated 2023). *Analytics Vidhya*. https://www.analyticsvidhya.com/blog/2021/10/a-comprehensive-guide-to-time-series-analysis/
+
+5. Monigatti, Leonie (2022, August 2). Interpreting ACF and PACF Plots for Time Series Forecasting. *Towards Data Science*. https://towardsdatascience.com/interpreting-acf-and-pacf-plots-for-time-series-forecasting-af0d6db4061c
+
+6. Li, Y.E., Preissl, S., Hou, X. et al (2021, October 6). An atlas of gene regulatory elements in adult mouse cerebrum. *Nature* 598, 129–136. https://doi.org/10.1038/s41586-021-03604-1
+
+7. Function for printing confusion matrix taken from https://stackoverflow.com/questions/23891140/r-how-to-visualize-confusion-matrix-using-the-caret-package, user Cybernetic (2017, March 22).
